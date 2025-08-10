@@ -1,0 +1,8 @@
+﻿<Window x:Class="RotatingEOverlay.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="DisclosureOverlay" WindowStyle="None" ResizeMode="NoResize" Topmost="True" ShowInTaskbar="False" AllowsTransparency="True" Background="Black" WindowState="Maximized" Cursor="None" Focusable="False">
+    <Grid>
+        <TextBlock Text=""/>
+    </Grid>
+</Window>

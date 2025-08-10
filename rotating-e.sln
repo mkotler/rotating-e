@@ -1,0 +1,24 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RotatingEOverlay", "RotatingEOverlay\RotatingEOverlay.csproj", "{76E98AC2-1C98-D43C-FC24-EE71D5A74721}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{76E98AC2-1C98-D43C-FC24-EE71D5A74721}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{76E98AC2-1C98-D43C-FC24-EE71D5A74721}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{76E98AC2-1C98-D43C-FC24-EE71D5A74721}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{76E98AC2-1C98-D43C-FC24-EE71D5A74721}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {00012FBC-592C-45AF-A8E9-B04D1F15006E}
+	EndGlobalSection
+EndGlobal
