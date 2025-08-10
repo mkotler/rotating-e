@@ -1,6 +1,5 @@
 using System;
 using System.Runtime.InteropServices;
-using System.Threading;
 using System.Threading.Tasks;
 
 namespace RotatingEOverlay;
@@ -10,9 +9,8 @@ public class OutlookWatcher : IDisposable
     private dynamic? _app;           // Outlook.Application
     private dynamic? _ns;            // Namespace
     private dynamic? _inbox;         // MAPIFolder
-    private Timer? _pollTimer;
+    private System.Threading.Timer? _pollTimer;
     private string? _lastTopId;
-    private bool _initialized;
 
     public event EventHandler? NewMail;
 
@@ -29,8 +27,7 @@ public class OutlookWatcher : IDisposable
             _inbox = _ns?.GetDefaultFolder(6);
             // Prime last id
             _lastTopId = GetTopMessageId();
-            _pollTimer = new Timer(async _ => await PollAsync(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
-            _initialized = true;
+            _pollTimer = new System.Threading.Timer(async _ => await PollAsync(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
             System.Diagnostics.Debug.WriteLine("[OutlookWatcher] Initialized. First top id=" + (_lastTopId ?? "<none>"));
             return true;
         }

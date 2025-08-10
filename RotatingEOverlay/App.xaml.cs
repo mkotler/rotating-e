@@ -1,5 +1,8 @@
 ﻿using System;
 using System.Runtime.InteropServices;
+using System.IO;
+using System.Drawing;
+using System.Windows.Forms;
 using System.Windows;
 using System.Windows.Threading;
 
@@ -8,11 +11,12 @@ namespace RotatingEOverlay
     /// <summary>
     /// Interaction logic for App.xaml
     /// </summary>
-    public partial class App : Application
+    public partial class App : System.Windows.Application
     {
         private OutlookWatcher? _watcher;
         private MainWindow? _overlay;
         private bool _armed;
+    private NotifyIcon? _trayIcon;
 
         protected override void OnStartup(StartupEventArgs e)
         {
@@ -37,6 +41,72 @@ namespace RotatingEOverlay
             }
 
             HookGlobalInput();
+
+            InitTray();
+        }
+
+        private void InitTray()
+        {
+            try
+            {
+                _trayIcon = new NotifyIcon
+                {
+                    Icon = LoadTrayIcon(),
+                    Visible = true,
+                    Text = "Disclosure"
+                };
+
+                var menu = new ContextMenuStrip();
+                var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => ExitFromTray());
+                menu.Items.Add(exitItem);
+                _trayIcon.ContextMenuStrip = menu;
+
+                // Optional: double-click to test showing overlay manually
+                _trayIcon.DoubleClick += (_, _) => Dispatcher.Invoke(ShowOverlay);
+
+                System.Diagnostics.Debug.WriteLine("[App] Tray icon initialized");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("[App] Tray init failed: " + ex.Message);
+            }
+        }
+
+    private Icon LoadTrayIcon()
+        {
+            try
+            {
+                var pngPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "e-icon.png");
+                if (File.Exists(pngPath))
+                {
+                    using var bmp = new Bitmap(pngPath);
+                    // NOTE: Icon.FromHandle should ideally release handle via DestroyIcon; negligible for single icon lifetime
+                    var icon = Icon.FromHandle(bmp.GetHicon());
+                    return icon;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("[App] LoadTrayIcon error: " + ex.Message);
+            }
+            return SystemIcons.Application;
+        }
+
+        private void ExitFromTray()
+        {
+            System.Diagnostics.Debug.WriteLine("[App] Exit requested from tray");
+            try { _overlay?.HideUnity(kill: true); } catch { }
+            try
+            {
+                if (_trayIcon != null)
+                {
+                    _trayIcon.Visible = false;
+                    _trayIcon.Dispose();
+                    _trayIcon = null;
+                }
+            }
+            catch { }
+            Shutdown();
         }
 
         private void ShowOverlay()
@@ -77,6 +147,17 @@ namespace RotatingEOverlay
         {
             UnhookWindowsHookEx(_hookId);
             _watcher?.Dispose();
+            if (_trayIcon != null)
+            {
+                try
+                {
+                    _trayIcon.Visible = false;
+                    _trayIcon.Dispose();
+                }
+                catch { }
+                _trayIcon = null;
+            }
+            try { _overlay?.HideUnity(kill: true); } catch { }
             base.OnExit(e);
         }
 
