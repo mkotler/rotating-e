@@ -22,6 +22,11 @@ namespace RotatingEOverlay
     private bool _paused;
     private DateTime _lastInputUtc;
     private int _idleThresholdSeconds = 60; // default; overridable via config
+    private IntPtr _keyboardHookId = IntPtr.Zero;
+    private IntPtr _mouseHookId = IntPtr.Zero;
+    private bool _verbose = false; // toggle for extra diagnostics (disabled by default now)
+    private DateTime _overlayShownUtc;
+    private const int MouseMoveSuppressMs = 200; // don't treat initial synthetic move as real input within this window
 
         protected override void OnStartup(StartupEventArgs e)
         {
@@ -91,8 +96,10 @@ namespace RotatingEOverlay
                         try { _overlay?.HideUnity(); } catch { }
                     }
                 };
+                var showItem = new ToolStripMenuItem("Show", null, (_, _) => ForceShowOverlay());
                 var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => ExitFromTray());
                 menu.Items.Add(_pauseItem);
+                menu.Items.Add(showItem);
                 menu.Items.Add(new ToolStripSeparator());
                 menu.Items.Add(exitItem);
                 _trayIcon.ContextMenuStrip = menu;
@@ -106,6 +113,21 @@ namespace RotatingEOverlay
             {
                 System.Diagnostics.Debug.WriteLine("[App] Tray init failed: " + ex.Message);
             }
+        }
+
+        private void ForceShowOverlay()
+        {
+            System.Diagnostics.Debug.WriteLine("[App] ForceShowOverlay requested (tray menu)");
+            if (_overlay == null)
+            {
+                System.Diagnostics.Debug.WriteLine("[App] _overlay is null (ForceShowOverlay)");
+                return;
+            }
+            _overlay.ShowUnityWindow();
+            _overlay.Activate();
+            _armed = true;
+            _overlayShownUtc = DateTime.UtcNow;
+            System.Diagnostics.Debug.WriteLine("[App] Overlay forcibly shown (tray menu)");
         }
 
     private Icon LoadTrayIcon()
@@ -148,19 +170,16 @@ namespace RotatingEOverlay
         private void ShowOverlay()
         {
             System.Diagnostics.Debug.WriteLine("[App] ShowOverlay requested");
+            if (_verbose) LogState("ShowOverlay.enter");
             if (_paused)
             {
                 System.Diagnostics.Debug.WriteLine("[App] Suppressed (paused)");
                 return;
             }
-            if (!IsUserIdle())
+            bool idle = IsUserIdle();
+            if (!idle)
             {
                 System.Diagnostics.Debug.WriteLine("[App] Suppressed (user active / not idle)");
-                return;
-            }
-            if (IsForegroundFullscreen())
-            {
-                System.Diagnostics.Debug.WriteLine("[App] Suppressed (foreground fullscreen)");
                 return;
             }
             if (_armed) // already showing for prior mail
@@ -176,32 +195,50 @@ namespace RotatingEOverlay
             _overlay.ShowUnityWindow();
             _overlay.Activate();
             _armed = true;
+            _overlayShownUtc = DateTime.UtcNow;
             System.Diagnostics.Debug.WriteLine("[App] Overlay shown and armed");
+            if (_verbose) LogState("ShowOverlay.afterShow");
         }
 
         private void HideOverlay()
         {
             if (_overlay is { IsVisible: true })
             {
-                _overlay.HideUnity(kill: false);
+                _overlay.HideUnity(kill: true);
                 System.Diagnostics.Debug.WriteLine("[App] Overlay hidden");
+            }
+            else
+            {
+                System.Diagnostics.Debug.WriteLine("[App] HideOverlay called but overlay not visible");
             }
         }
 
         #region Global Input
         private delegate IntPtr LowLevelProc(int nCode, IntPtr wParam, IntPtr lParam);
-        private static IntPtr _hookId = IntPtr.Zero;
         private LowLevelProc? _proc;
 
         private void HookGlobalInput()
         {
             _proc = HookCallback;
-            _hookId = SetHook(_proc);
+            using var curProcess = System.Diagnostics.Process.GetCurrentProcess();
+            using var curModule = curProcess.MainModule!;
+            _keyboardHookId = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, GetModuleHandle(curModule.ModuleName), 0);
+            _mouseHookId = SetWindowsHookEx(WH_MOUSE_LL, _proc, GetModuleHandle(curModule.ModuleName), 0);
+            System.Diagnostics.Debug.WriteLine("[App] Hooks installed keyboard=" + _keyboardHookId + " mouse=" + _mouseHookId);
         }
 
         protected override void OnExit(ExitEventArgs e)
         {
-            UnhookWindowsHookEx(_hookId);
+            try
+            {
+                if (_keyboardHookId != IntPtr.Zero) UnhookWindowsHookEx(_keyboardHookId);
+            }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[App] Unhook keyboard failed: " + ex.Message); }
+            try
+            {
+                if (_mouseHookId != IntPtr.Zero) UnhookWindowsHookEx(_mouseHookId);
+            }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[App] Unhook mouse failed: " + ex.Message); }
             _watcher?.Dispose();
             if (_trayIcon != null)
             {
@@ -221,17 +258,61 @@ namespace RotatingEOverlay
         {
             if (nCode >= 0)
             {
-                _lastInputUtc = DateTime.UtcNow; // track input time always
+                bool isKeyboardMsg = IsKeyboardMessage((int)wParam);
+                bool isMouseMsg = !isKeyboardMsg; // since only two hooks share callback
+                bool injected = false;
+                int msg = (int)wParam;
+                if (isKeyboardMsg)
+                {
+                    try
+                    {
+                        KBDLLHOOKSTRUCT kb = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
+                        injected = (kb.flags & LLKHF_INJECTED) != 0; // synthetic keyboard
+                    }
+                    catch { }
+                }
+                else if (isMouseMsg)
+                {
+                    try
+                    {
+                        MSLLHOOKSTRUCT ms = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
+                        injected = (ms.flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED)) != 0; // synthetic mouse
+                    }
+                    catch { }
+                }
+
+                TimeSpan sinceShown = _overlayShownUtc == default ? TimeSpan.MaxValue : DateTime.UtcNow - _overlayShownUtc;
+                bool isMeaningful = IsMeaningfulUserAction(msg, sinceShown);
+
+                if (_verbose)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[App] Input event msg=0x{msg:X} injected={injected} meaningful={isMeaningful} armed={_armed} sinceShownMs={sinceShown.TotalMilliseconds:F0}");
+                }
+
+                if (injected)
+                {
+                    if (_verbose) System.Diagnostics.Debug.WriteLine("[App] Ignored injected event");
+                    return CallNextHookEx(_keyboardHookId, nCode, wParam, lParam);
+                }
+
+                if (!isMeaningful)
+                {
+                    if (_verbose) System.Diagnostics.Debug.WriteLine("[App] Ignored non-meaningful (e.g., early mouse move)");
+                    return CallNextHookEx(_keyboardHookId, nCode, wParam, lParam);
+                }
+
+                _lastInputUtc = DateTime.UtcNow; // track input time
                 if (_armed)
                 {
                     _armed = false;
-                    System.Diagnostics.Debug.WriteLine("[App] Input -> hiding overlay & Unity");
+                    System.Diagnostics.Debug.WriteLine("[App] Meaningful input -> hiding overlay & Unity");
                     Dispatcher.Invoke(() =>
                     {
                         try
                         {
                             HideOverlay();
-                            _overlay?.HideUnity();
+                            _overlay?.HideUnity(kill: true);
+                            if (_verbose) LogState("AfterHideOnInput");
                         }
                         catch (Exception ex)
                         {
@@ -239,8 +320,13 @@ namespace RotatingEOverlay
                         }
                     });
                 }
+                else if (_verbose)
+                {
+                    System.Diagnostics.Debug.WriteLine("[App] Meaningful input while not armed (no hide)");
+                }
             }
-            return CallNextHookEx(_hookId, nCode, wParam, lParam);
+            // Use keyboard hook handle for chaining; if null fallback to IntPtr.Zero
+            return CallNextHookEx(_keyboardHookId, nCode, wParam, lParam);
         }
 
         private bool IsUserIdle()
@@ -254,7 +340,8 @@ namespace RotatingEOverlay
                 // Win32 last input
                 uint win32IdleMs = GetLastInputMilliseconds();
                 bool idle = hookIdleMs >= thresholdMs || win32IdleMs >= thresholdMs;
-                System.Diagnostics.Debug.WriteLine($"[App] Idle check hook={hookIdleMs:F0}ms win32={win32IdleMs}ms thresh={thresholdMs} -> {idle}");
+                if (_verbose)
+                    System.Diagnostics.Debug.WriteLine($"[App] Idle check hook={hookIdleMs:F0}ms win32={win32IdleMs}ms thresh={thresholdMs} -> {idle}");
                 return idle;
             }
             catch (Exception ex)
@@ -274,42 +361,72 @@ namespace RotatingEOverlay
             return 0;
         }
 
-        private bool IsForegroundFullscreen()
+
+        private void LogState(string tag)
         {
             try
             {
-                IntPtr fg = GetForegroundWindow();
-                if (fg == IntPtr.Zero) return false;
-                if (!GetWindowRect(fg, out RECT rect)) return false;
-                IntPtr monitor = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
-                if (monitor == IntPtr.Zero) return false;
-                MONITORINFO mi = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
-                if (!GetMonitorInfo(monitor, ref mi)) return false;
-                int w = rect.Right - rect.Left;
-                int h = rect.Bottom - rect.Top;
-                int mw = (int)(mi.rcMonitor.Right - mi.rcMonitor.Left);
-                int mh = (int)(mi.rcMonitor.Bottom - mi.rcMonitor.Top);
-                bool fullscreen = Math.Abs(w - mw) <= 2 && Math.Abs(h - mh) <= 2; // tolerances
-                if (fullscreen)
-                    System.Diagnostics.Debug.WriteLine($"[App] Foreground fullscreen detected size={w}x{h} monitor={mw}x{mh}");
-                return fullscreen;
+                bool overlayVisible = _overlay?.IsVisible ?? false;
+                double lastInputMs = (DateTime.UtcNow - _lastInputUtc).TotalMilliseconds;
+                System.Diagnostics.Debug.WriteLine($"[App] State[{tag}] armed={_armed} paused={_paused} overlayVisible={overlayVisible} lastInputAgeMs={lastInputMs:F0} idleThresholdSec={_idleThresholdSeconds}");
             }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine("[App] IsForegroundFullscreen exception: " + ex.Message);
-                return false;
-            }
+            catch { }
         }
 
-        private static IntPtr SetHook(LowLevelProc proc)
+        private static bool IsKeyboardMessage(int msg)
         {
-            using var curProcess = System.Diagnostics.Process.GetCurrentProcess();
-            using var curModule = curProcess.MainModule!;
-            IntPtr h = SetWindowsHookEx(WH_KEYBOARD_LL, proc, GetModuleHandle(curModule.ModuleName), 0);
-            IntPtr hm = SetWindowsHookEx(WH_MOUSE_LL, proc, GetModuleHandle(curModule.ModuleName), 0);
-            System.Diagnostics.Debug.WriteLine("[App] Keyboard hook=" + h + " mouse hook=" + hm);
-            return h; // store only keyboard for unhook simplicity
+            return msg == WM_KEYDOWN || msg == WM_KEYUP || msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP;
         }
+
+        private bool IsMeaningfulUserAction(int msg, TimeSpan sinceShown)
+        {
+            // Keyboard key press
+            if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) return true;
+            // Mouse button / wheel events
+            switch (msg)
+            {
+                case WM_LBUTTONDOWN:
+                case WM_RBUTTONDOWN:
+                case WM_MBUTTONDOWN:
+                case WM_XBUTTONDOWN:
+                case WM_MOUSEWHEEL:
+                case WM_MOUSEHWHEEL:
+                    return true;
+                case WM_MOUSEMOVE:
+                    // Treat as meaningful only if overlay has been visible beyond suppression window
+                    return sinceShown.TotalMilliseconds > MouseMoveSuppressMs;
+            }
+            return false; // ignore other events (keyup, button up, etc.)
+        }
+
+        // Low-level hook structs
+        [StructLayout(LayoutKind.Sequential)]
+        private struct KBDLLHOOKSTRUCT
+        {
+            public uint vkCode; public uint scanCode; public uint flags; public uint time; public UIntPtr dwExtraInfo;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MSLLHOOKSTRUCT
+        {
+            public POINT pt; public uint mouseData; public uint flags; public uint time; public UIntPtr dwExtraInfo;
+        }
+        [StructLayout(LayoutKind.Sequential)] private struct POINT { public int x; public int y; }
+
+        // Message & flag constants
+        private const int WM_MOUSEMOVE = 0x0200;
+        private const int WM_LBUTTONDOWN = 0x0201;
+        private const int WM_RBUTTONDOWN = 0x0204;
+        private const int WM_MBUTTONDOWN = 0x0207;
+        private const int WM_XBUTTONDOWN = 0x020B;
+        private const int WM_MOUSEWHEEL = 0x020A;
+        private const int WM_MOUSEHWHEEL = 0x020E;
+        private const int WM_KEYDOWN = 0x0100;
+        private const int WM_KEYUP = 0x0101;
+        private const int WM_SYSKEYDOWN = 0x0104;
+        private const int WM_SYSKEYUP = 0x0105;
+        private const uint LLKHF_INJECTED = 0x00000010;
+        private const uint LLMHF_INJECTED = 0x00000001;
+        private const uint LLMHF_LOWER_IL_INJECTED = 0x00000002;
 
         private const int WH_KEYBOARD_LL = 13;
         private const int WH_MOUSE_LL = 14; // can add mouse if desired
@@ -330,14 +447,7 @@ namespace RotatingEOverlay
     [DllImport("user32.dll")] private static extern bool GetLastInputInfo(out LASTINPUTINFO plii);
     [DllImport("kernel32.dll")] private static extern uint GetTickCount();
 
-    // Fullscreen detection
-    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll", SetLastError = true)] private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-    [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
-    [DllImport("user32.dll", SetLastError = true)] private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
-    private const uint MONITOR_DEFAULTTONEAREST = 2;
-    [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
-    [StructLayout(LayoutKind.Sequential)] private struct MONITORINFO { public uint cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags; }
+    // (Removed fullscreen detection code as no longer used)
         #endregion
     }
 }
